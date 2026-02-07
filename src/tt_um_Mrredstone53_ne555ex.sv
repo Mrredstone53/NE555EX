@@ -1,22 +1,8 @@
 // NE555EX for Tiny Tapeout (TT standard top interface)
-// Fixes: adds required 'ena' port expected by TT tooling.
-//
-// ui_in[0] EN (extra enable inside design; global ena also gates)
-// ui_in[2:1] MODE: 00 mono, 01 astable, 10 pwm, 11 burst
-// ui_in[3] TRIG_FIRE
-// ui_in[4] SYNC
-// ui_in[5] INV_OUT
-// ui_in[6] RETRIG_EN
-// ui_in[7] PIN_RESET_N (0 = reset)
-//
-// uio_in[3:0] RATE (prescaler shift)
-// uio_in[7:4] DUTY (0..15) for PWM
-//
-// uo_out[0] OUT
-// uo_out[1] DISCHARGE
-// uo_out[2] DONE
-// uo_out[5:3] DBG_STATE
-// uo_out[7:6] DBG_CNT(1:0)
+// Fixes:
+// - Adds required 'ena' port
+// - Removes multi-driven uo_out bits
+// - Removes latch inference in PWM_RUN by making period/high_ticks wires
 
 module tt_um_Mrredstone53_ne555ex (
     input  wire [7:0] ui_in,
@@ -86,6 +72,10 @@ module tt_um_Mrredstone53_ne555ex (
   wire [15:0] T_PULSE     = 16'd120;
   wire [15:0] BURST_ON_T  = 16'd60;
   wire [15:0] BURST_OFF_T = 16'd200;
+
+  // PWM timing as WIRES (no latches!)
+  wire [15:0] PWM_PERIOD    = 16'd256;
+  wire [15:0] PWM_HIGH_TICKS = (PWM_PERIOD * {12'd0, duty}) >> 4; // duty 0..15 -> 0..period
 
   reg out_i, discharge_i, done_i;
 
@@ -181,21 +171,14 @@ module tt_um_Mrredstone53_ne555ex (
         end
 
         PWM_RUN: begin
-          // PWM period (in ticks)
-          // duty[3:0] maps 0..15 => 0..(period-1)
-          reg [15:0] period;
-          reg [15:0] high_ticks;
-          period     = 16'd256;
-          high_ticks = (period * duty) >> 4;
-
           if (sync) begin
             cnt_n = 16'd0;
           end else if (tick) begin
-            if (cnt >= (period - 1)) cnt_n = 16'd0;
+            if (cnt >= (PWM_PERIOD - 1)) cnt_n = 16'd0;
             else cnt_n = cnt + 16'd1;
           end
 
-          out_i       = (cnt < high_ticks);
+          out_i       = (cnt < PWM_HIGH_TICKS);
           discharge_i = ~out_i;
         end
 
@@ -247,17 +230,15 @@ module tt_um_Mrredstone53_ne555ex (
     else if (done_stretch != 0) done_stretch <= done_stretch - 4'd1;
   end
 
-  // Pack outputs
-  assign uo_out[0] = out_final;
-  assign uo_out[1] = discharge_i;
-  assign uo_out[2] = (done_stretch != 0);
-  assign uo_out[5:3] = st[2:0];
-  assign uo_out[7:6] = cnt[1:0];
+  // ---- Pack outputs into a single bus with NO multiple drivers ----
+  wire done_out = (done_stretch != 0);
 
-  // unused outputs
-  assign uo_out[3] = st[0];
-  assign uo_out[4] = st[1];
-  // (uo_out[5] already used as part of [5:3])
-  // (uo_out[6],[7] used)
+  assign uo_out = {
+    cnt[1:0],     // [7:6] DBG_CNT
+    st[2:0],      // [5:3] DBG_STATE
+    done_out,     // [2]   DONE
+    discharge_i,  // [1]   DISCHARGE
+    out_final     // [0]   OUT
+  };
 
 endmodule
