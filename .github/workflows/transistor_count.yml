@@ -2,50 +2,42 @@ name: Transistor count (GDS -> MOS)
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "**/*.gds"
-      - "**/*.oas"
-      - ".github/workflows/transistor_count.yml"
 
 jobs:
   count:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Find GDS + prepare magic script
+      - name: Prepare variables + extract script
         shell: bash
         run: |
           set -euo pipefail
 
-          # === EDIT THIS ===
           TOPCELL="tt_um_Mrredstone53_ne555ex"
-
-          # Find a GDS in the repo (adjust if you want a specific path)
           GDS="$(find . -type f -name '*.gds' | head -n 1 || true)"
-          if [ -z "$GDS" ]; then
-            echo "No .gds file found in repo. Commit your GDS or adjust the find command."
+
+          if [ -z "${GDS}" ]; then
+            echo "No .gds found in repo."
             exit 1
           fi
 
-          echo "TOPCELL=$TOPCELL" >> "$GITHUB_ENV"
-          echo "GDS=$GDS"         >> "$GITHUB_ENV"
+          echo "TOPCELL=${TOPCELL}" >> "${GITHUB_ENV}"
+          echo "GDS=${GDS}" >> "${GITHUB_ENV}"
 
-          echo "Using GDS: $GDS"
-          echo "Top cell:  $TOPCELL"
+          echo "Using GDS: ${GDS}"
+          echo "Top cell:  ${TOPCELL}"
 
-          # Write magic command file (no YAML heredoc problems)
-          cat > extract.tcl <<'TCL'
-          tech load sky130A
-          gds read $::env(GDS)
-          load $::env(TOPCELL)
-          extract all
-          ext2spice lvs
-          ext2spice
-          quit
-TCL
+          # Create extract.tcl without heredoc (YAML-safe)
+          printf '%s\n' \
+            'tech load sky130A' \
+            'gds read $::env(GDS)' \
+            'load $::env(TOPCELL)' \
+            'extract all' \
+            'ext2spice lvs' \
+            'ext2spice' \
+            'quit' \
+            > extract.tcl
 
       - name: Run extraction + count MOSFETs
         shell: bash
@@ -62,14 +54,13 @@ TCL
 
               SPICE_FILE="${TOPCELL}.spice"
               if [ ! -f "$SPICE_FILE" ]; then
-                echo "Expected $SPICE_FILE not found. Maybe TOPCELL is wrong?"
+                echo "Expected $SPICE_FILE not found. TOPCELL wrong?"
                 ls -la
                 exit 1
               fi
 
               MOS=$(grep -c "^M" "$SPICE_FILE" || true)
               echo "MOSFET count: $MOS"
-
               printf "GDS=%s\nTOPCELL=%s\nMOSFETs=%s\n" "$GDS" "$TOPCELL" "$MOS" > transistor_report.txt
             '
 
