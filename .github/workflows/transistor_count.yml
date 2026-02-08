@@ -15,10 +15,11 @@ jobs:
           set -euo pipefail
 
           TOPCELL="tt_um_Mrredstone53_ne555ex"
-          GDS="$(find . -type f -name '*.gds' | head -n 1 || true)"
+          GDS="./tt_submission/tt_um_Mrredstone53_ne555ex.gds"
 
-          if [ -z "${GDS}" ]; then
-            echo "No .gds found in repo."
+          if [ ! -f "${GDS}" ]; then
+            echo "GDS not found at ${GDS}"
+            ls -la ./tt_submission || true
             exit 1
           fi
 
@@ -28,9 +29,9 @@ jobs:
           echo "Using GDS: ${GDS}"
           echo "Top cell:  ${TOPCELL}"
 
-          # Create extract.tcl without heredoc (YAML-safe)
           printf '%s\n' \
-            'tech load sky130A' \
+            'set PDK_ROOT $::env(PDK_ROOT)' \
+            'tech load $PDK_ROOT/sky130A/libs.tech/magic/sky130A.tech' \
             'gds read $::env(GDS)' \
             'load $::env(TOPCELL)' \
             'extract all' \
@@ -49,18 +50,29 @@ jobs:
             hpretl/iic-osic-tools:latest \
             --skip bash -lc '
               set -euo pipefail
-              sak-pdk sky130A
+
+              export PDK_ROOT=/foss/pdks
+              export PDK=sky130A
+
+              echo "=== DEBUG: GDS + TOPCELL ==="
+              echo "GDS=$GDS"
+              echo "TOPCELL=$TOPCELL"
+              ls -lah tt_submission | sed -n "1,200p"
+
               magic -dnull -noconsole extract.tcl
 
               SPICE_FILE="${TOPCELL}.spice"
               if [ ! -f "$SPICE_FILE" ]; then
-                echo "Expected $SPICE_FILE not found. TOPCELL wrong?"
-                ls -la
+                echo "ERROR: Expected $SPICE_FILE not found."
+                echo "Most likely TOPCELL is wrong or Magic could not load the cell."
+                echo "Files now:"
+                ls -lah
                 exit 1
               fi
 
               MOS=$(grep -c "^M" "$SPICE_FILE" || true)
               echo "MOSFET count: $MOS"
+
               printf "GDS=%s\nTOPCELL=%s\nMOSFETs=%s\n" "$GDS" "$TOPCELL" "$MOS" > transistor_report.txt
             '
 
