@@ -1,0 +1,73 @@
+name: Transistor count (GDS -> MOS)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "**/*.gds"
+      - "**/*.oas"
+      - ".github/workflows/transistor_count.yml"
+
+jobs:
+  count:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Count MOSFETs from GDS using Magic (SKY130)
+        run: |
+          set -euo pipefail
+
+          # === EDIT THESE TWO IF NEEDED ===
+          TOPCELL="tt_um_Mrredstone53_ne555ex"
+          # Pick the first GDS we find (change glob to match your repo layout)
+          GDS="$(ls -1 **/*.gds 2>/dev/null | head -n 1 || true)"
+
+          if [ -z "${GDS}" ]; then
+            echo "No .gds found. Commit your GDS or adjust the glob in the workflow."
+            exit 1
+          fi
+
+          echo "Using GDS: ${GDS}"
+          echo "Top cell:  ${TOPCELL}"
+
+          docker run --rm \
+            -v "${PWD}:/work" -w /work \
+            hpretl/iic-osic-tools:latest \
+            bash -lc "
+              set -euo pipefail
+
+              # Select SKY130 (sets PDK env vars inside container)
+              sak-pdk sky130A
+
+              # Run Magic extraction -> SPICE
+              magic -dnull -noconsole <<'EOF'
+              tech load sky130A
+              gds read ${GDS}
+              load ${TOPCELL}
+              extract all
+              ext2spice lvs
+              ext2spice
+              quit
+EOF
+
+              # Count MOS lines in the extracted SPICE
+              SPICE_FILE=\"${TOPCELL}.spice\"
+              if [ ! -f \"\$SPICE_FILE\" ]; then
+                echo \"Expected \$SPICE_FILE not found. Maybe TOPCELL is wrong?\"
+                ls -la
+                exit 1
+              fi
+
+              MOS=\$(grep -c '^M' \"\$SPICE_FILE\" || true)
+              echo \"MOSFET count: \$MOS\"
+
+              # Write a small report file for artifacts
+              printf \"GDS=%s\nTOPCELL=%s\nMOSFETs=%s\n\" \"${GDS}\" \"${TOPCELL}\" \"\$MOS\" > transistor_report.txt
+            "
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: transistor_report
+          path: transistor_report.txt
