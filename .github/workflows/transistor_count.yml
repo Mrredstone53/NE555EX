@@ -12,59 +12,66 @@ jobs:
   count:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Count MOSFETs from GDS using Magic (SKY130)
+      - name: Find GDS + prepare magic script
+        shell: bash
         run: |
           set -euo pipefail
 
-          # === EDIT THESE TWO IF NEEDED ===
+          # === EDIT THIS ===
           TOPCELL="tt_um_Mrredstone53_ne555ex"
-          # Pick the first GDS we find (change glob to match your repo layout)
-          GDS="$(ls -1 **/*.gds 2>/dev/null | head -n 1 || true)"
 
-          if [ -z "${GDS}" ]; then
-            echo "No .gds found. Commit your GDS or adjust the glob in the workflow."
+          # Find a GDS in the repo (adjust if you want a specific path)
+          GDS="$(find . -type f -name '*.gds' | head -n 1 || true)"
+          if [ -z "$GDS" ]; then
+            echo "No .gds file found in repo. Commit your GDS or adjust the find command."
             exit 1
           fi
 
-          echo "Using GDS: ${GDS}"
-          echo "Top cell:  ${TOPCELL}"
+          echo "TOPCELL=$TOPCELL" >> "$GITHUB_ENV"
+          echo "GDS=$GDS"         >> "$GITHUB_ENV"
+
+          echo "Using GDS: $GDS"
+          echo "Top cell:  $TOPCELL"
+
+          # Write magic command file (no YAML heredoc problems)
+          cat > extract.tcl <<'TCL'
+          tech load sky130A
+          gds read $::env(GDS)
+          load $::env(TOPCELL)
+          extract all
+          ext2spice lvs
+          ext2spice
+          quit
+TCL
+
+      - name: Run extraction + count MOSFETs
+        shell: bash
+        run: |
+          set -euo pipefail
 
           docker run --rm \
             -v "${PWD}:/work" -w /work \
             hpretl/iic-osic-tools:latest \
-            bash -lc "
+            bash -lc '
               set -euo pipefail
-
-              # Select SKY130 (sets PDK env vars inside container)
               sak-pdk sky130A
+              magic -dnull -noconsole extract.tcl
 
-              # Run Magic extraction -> SPICE
-              magic -dnull -noconsole <<'EOF'
-              tech load sky130A
-              gds read ${GDS}
-              load ${TOPCELL}
-              extract all
-              ext2spice lvs
-              ext2spice
-              quit
-EOF
-
-              # Count MOS lines in the extracted SPICE
-              SPICE_FILE=\"${TOPCELL}.spice\"
-              if [ ! -f \"\$SPICE_FILE\" ]; then
-                echo \"Expected \$SPICE_FILE not found. Maybe TOPCELL is wrong?\"
+              SPICE_FILE="${TOPCELL}.spice"
+              if [ ! -f "$SPICE_FILE" ]; then
+                echo "Expected $SPICE_FILE not found. Maybe TOPCELL is wrong?"
                 ls -la
                 exit 1
               fi
 
-              MOS=\$(grep -c '^M' \"\$SPICE_FILE\" || true)
-              echo \"MOSFET count: \$MOS\"
+              MOS=$(grep -c "^M" "$SPICE_FILE" || true)
+              echo "MOSFET count: $MOS"
 
-              # Write a small report file for artifacts
-              printf \"GDS=%s\nTOPCELL=%s\nMOSFETs=%s\n\" \"${GDS}\" \"${TOPCELL}\" \"\$MOS\" > transistor_report.txt
-            "
+              printf "GDS=%s\nTOPCELL=%s\nMOSFETs=%s\n" "$GDS" "$TOPCELL" "$MOS" > transistor_report.txt
+            '
 
       - name: Upload report
         uses: actions/upload-artifact@v4
