@@ -47,7 +47,7 @@ jobs:
           docker run --rm \
             -v "${PWD}:/work" -w /work \
             hpretl/iic-osic-tools:latest \
-            bash -lc '
+            --skip bash -lc '
               set -euo pipefail
               sak-pdk sky130A
               magic -dnull -noconsole extract.tcl
