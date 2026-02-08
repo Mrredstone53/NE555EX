@@ -67,19 +67,30 @@ jobs:
 
               magic -dnull -noconsole extract.tcl
 
+              # ---- Robust netlist detection (spice.out vs <top>.spice) ----
               SPICE_FILE="${TOPCELL}.spice"
+
+              if [ ! -f "$SPICE_FILE" ] && [ -f "spice.out" ]; then
+                SPICE_FILE="spice.out"
+              fi
+
               if [ ! -f "$SPICE_FILE" ]; then
-                echo "ERROR: Expected $SPICE_FILE not found."
-                echo "Likely TOPCELL wrong or Magic load/read failed."
+                SPICE_FILE="$(ls -1 *.spice *.spc *.cdl *.cir 2>/dev/null | head -n 1 || true)"
+              fi
+
+              if [ -z "${SPICE_FILE}" ] || [ ! -f "${SPICE_FILE}" ]; then
+                echo "ERROR: No SPICE-like netlist found after Magic."
                 echo "Files now:"
                 ls -lah
                 exit 1
               fi
 
+              echo "Using netlist: ${SPICE_FILE}"
+
               MOS=$(grep -c "^M" "$SPICE_FILE" || true)
               echo "MOSFET count: $MOS"
 
-              printf "GDS=%s\nTOPCELL=%s\nMOSFETs=%s\n" "$GDS" "$TOPCELL" "$MOS" > transistor_report.txt
+              printf "GDS=%s\nTOPCELL=%s\nNETLIST=%s\nMOSFETs=%s\n" "$GDS" "$TOPCELL" "$SPICE_FILE" "$MOS" > transistor_report.txt
             '
 
       - name: Upload report
