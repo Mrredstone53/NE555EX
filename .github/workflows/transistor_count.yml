@@ -26,9 +26,11 @@ jobs:
           echo "TOPCELL=${TOPCELL}" >> "${GITHUB_ENV}"
           echo "GDS=${GDS}" >> "${GITHUB_ENV}"
 
-          echo "Using GDS: ${GDS}"
-          echo "Top cell:  ${TOPCELL}"
+          echo "Host vars:"
+          echo "  GDS=${GDS}"
+          echo "  TOPCELL=${TOPCELL}"
 
+          # Magic script (tech file absolut im Container)
           printf '%s\n' \
             'set PDK_ROOT $::env(PDK_ROOT)' \
             'tech load $PDK_ROOT/sky130A/libs.tech/magic/sky130A.tech' \
@@ -45,19 +47,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Runner sees:"
+          echo "  GDS=$GDS"
+          echo "  TOPCELL=$TOPCELL"
+
           docker run --rm \
             -e GDS="$GDS" -e TOPCELL="$TOPCELL" \
+            -e PDK_ROOT="/foss/pdks" -e PDK="sky130A" \
             -v "${PWD}:/work" -w /work \
             hpretl/iic-osic-tools:latest \
             --skip bash -lc '
               set -euo pipefail
 
-              export PDK_ROOT=/foss/pdks
-              export PDK=sky130A
-
-              echo "=== DEBUG: GDS + TOPCELL ==="
+              echo "=== Container sees ==="
               echo "GDS=$GDS"
               echo "TOPCELL=$TOPCELL"
+              echo "PDK_ROOT=$PDK_ROOT"
               ls -lah tt_submission | sed -n "1,200p"
 
               magic -dnull -noconsole extract.tcl
@@ -65,7 +70,7 @@ jobs:
               SPICE_FILE="${TOPCELL}.spice"
               if [ ! -f "$SPICE_FILE" ]; then
                 echo "ERROR: Expected $SPICE_FILE not found."
-                echo "Most likely TOPCELL is wrong or Magic could not load the cell."
+                echo "Likely TOPCELL wrong or Magic load/read failed."
                 echo "Files now:"
                 ls -lah
                 exit 1
