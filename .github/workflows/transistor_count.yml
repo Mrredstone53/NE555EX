@@ -46,6 +46,7 @@ jobs:
           set -euo pipefail
 
           docker run --rm \
+            -e GDS="$GDS" -e TOPCELL="$TOPCELL" \
             -v "${PWD}:/work" -w /work \
             hpretl/iic-osic-tools:latest \
             --skip bash -lc '
