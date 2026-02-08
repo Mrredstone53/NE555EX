@@ -51,7 +51,11 @@ jobs:
           echo "  GDS=$GDS"
           echo "  TOPCELL=$TOPCELL"
 
+          OWNER="$(stat -c '%u:%g' .)"
+          echo "Workspace owner (will run container as): $OWNER"
+
           docker run --rm \
+            --user "$OWNER" \
             -e GDS="$GDS" -e TOPCELL="$TOPCELL" \
             -e PDK_ROOT="/foss/pdks" -e PDK="sky130A" \
             -v "${PWD}:/work" -w /work \
@@ -63,9 +67,11 @@ jobs:
               echo "GDS=$GDS"
               echo "TOPCELL=$TOPCELL"
               echo "PDK_ROOT=$PDK_ROOT"
+              id
               ls -lah tt_submission | sed -n "1,200p"
 
-              magic -dnull -noconsole extract.tcl
+              # optional: ignore whatever default .magicrc the image has
+              magic -dnull -noconsole -rcfile /dev/null extract.tcl
 
               # ---- Robust netlist detection (spice.out vs <top>.spice) ----
               SPICE_FILE="${TOPCELL}.spice"
@@ -92,6 +98,7 @@ jobs:
 
               printf "GDS=%s\nTOPCELL=%s\nNETLIST=%s\nMOSFETs=%s\n" "$GDS" "$TOPCELL" "$SPICE_FILE" "$MOS" > transistor_report.txt
             '
+
 
       - name: Upload report
         uses: actions/upload-artifact@v4
