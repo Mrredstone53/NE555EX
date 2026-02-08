@@ -56,7 +56,7 @@ jobs:
             -e PDK_ROOT="/foss/pdks" -e PDK="sky130A" \
             -v "${PWD}:/work" -w /work \
             hpretl/iic-osic-tools:latest \
-            --skip bash -lc '
+            --shell bash -lc '
               set -euo pipefail
 
               echo "=== Container sees ==="
