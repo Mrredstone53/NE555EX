@@ -1,4 +1,4 @@
-name: Transistor count (GDS -> MOS)
+name: Transistor count (stdcell stats -> MOS)
 
 on:
   workflow_dispatch:
@@ -9,96 +9,162 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare variables + extract script
+      - name: Count MOSFETs from synthesis stats + PDK SPICE
         shell: bash
         run: |
           set -euo pipefail
 
-          TOPCELL="tt_um_Mrredstone53_ne555ex"
-          GDS="./tt_submission/tt_um_Mrredstone53_ne555ex.gds"
-
-          if [ ! -f "${GDS}" ]; then
-            echo "GDS not found at ${GDS}"
-            ls -la ./tt_submission || true
+          # TinyTapeout stats file (exists in your repo already)
+          STATS="tt_submission/stats/synthesis-stats.txt"
+          if [ ! -f "$STATS" ]; then
+            echo "ERROR: Cannot find $STATS"
+            echo "Repo tree (tt_submission):"
+            find tt_submission -maxdepth 3 -type f | sed -n '1,200p'
             exit 1
           fi
 
-          echo "TOPCELL=${TOPCELL}" >> "${GITHUB_ENV}"
-          echo "GDS=${GDS}" >> "${GITHUB_ENV}"
+          # Create a small python helper script on the runner (easy quoting, robust)
+          cat > count_mos.py <<'PY'
+          import os, sys, glob, pathlib
 
-          echo "Host vars:"
-          echo "  GDS=${GDS}"
-          echo "  TOPCELL=${TOPCELL}"
+          stats_path = os.environ.get("STATS")
+          pdk_root    = os.environ.get("PDK_ROOT", "/foss/pdks")
+          pdk         = os.environ.get("PDK", "sky130A")
 
-          # Magic script (tech file absolut im Container)
-          printf '%s\n' \
-            'set PDK_ROOT $::env(PDK_ROOT)' \
-            'tech load $PDK_ROOT/sky130A/libs.tech/magic/sky130A.tech' \
-            'gds read $::env(GDS)' \
-            'load $::env(TOPCELL)' \
-            'extract all' \
-            'ext2spice lvs' \
-            'ext2spice' \
-            'quit' \
-            > extract.tcl
+          if not stats_path or not os.path.isfile(stats_path):
+            print(f"ERROR: STATS not found: {stats_path}", file=sys.stderr)
+            sys.exit(2)
 
-      - name: Run extraction + count MOSFETs
-        shell: bash
-        run: |
-          set -euo pipefail
+          base = pathlib.Path(pdk_root) / pdk
 
-          echo "Runner sees:"
-          echo "  GDS=$GDS"
-          echo "  TOPCELL=$TOPCELL"
+          # 1) Parse cell instance counts from synthesis-stats.txt
+          cell_counts = {}
+          with open(stats_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+              parts = line.split()
+              if len(parts) >= 2 and parts[0].startswith("sky130_") and parts[1].isdigit():
+                cell_counts[parts[0]] = int(parts[1])
 
-          OWNER="$(stat -c '%u:%g' .)"
-          echo "Workspace owner (will run container as): $OWNER"
+          if not cell_counts:
+            print("ERROR: No sky130_* cell lines found in stats file.", file=sys.stderr)
+            print("First 200 lines of stats:", file=sys.stderr)
+            with open(stats_path, "r", encoding="utf-8", errors="ignore") as f:
+              for i, l in enumerate(f):
+                if i >= 200: break
+                print(l.rstrip(), file=sys.stderr)
+            sys.exit(3)
 
+          # Group by library name prefix before "__"
+          libs = {}
+          for cell in cell_counts:
+            lib = cell.split("__", 1)[0]  # e.g. sky130_fd_sc_hd
+            libs.setdefault(lib, set()).add(cell)
+
+          def find_libfile(lib: str) -> str | None:
+            # Common naming in SKY130 PDK: <lib>.spice or <lib>.cdl
+            patterns = [
+              str(base / "**" / f"{lib}.spice"),
+              str(base / "**" / f"{lib}.cdl"),
+              str(base / "**" / f"{lib}.sp"),
+            ]
+            for pat in patterns:
+              hits = glob.glob(pat, recursive=True)
+              if hits:
+                return hits[0]
+            # fallback: any file that contains the lib name and ends with spice/cdl
+            patterns = [
+              str(base / "**" / f"*{lib}*.spice"),
+              str(base / "**" / f"*{lib}*.cdl"),
+            ]
+            for pat in patterns:
+              hits = glob.glob(pat, recursive=True)
+              if hits:
+                return hits[0]
+            return None
+
+          def parse_mos_per_cell(libfile: str) -> dict[str, int]:
+            mos = {}
+            current = None
+            count = 0
+            with open(libfile, "r", encoding="utf-8", errors="ignore") as f:
+              for line in f:
+                s = line.lstrip()
+                low = s.lower()
+                if low.startswith(".subckt"):
+                  # flush previous if somehow not ended cleanly
+                  if current is not None:
+                    mos.setdefault(current, count)
+                  parts = s.split()
+                  current = parts[1] if len(parts) > 1 else None
+                  count = 0
+                  continue
+                if current is not None:
+                  if s[:1] in ("M", "m"):
+                    count += 1
+                  elif low.startswith(".ends"):
+                    mos[current] = count
+                    current = None
+                    count = 0
+            # in case file ends mid-subckt
+            if current is not None:
+              mos.setdefault(current, count)
+            return mos
+
+          # 2) For each lib, load MOS counts from its transistor-level netlist
+          mos_per_cell = {}
+          missing_libs = []
+          for lib, cells in libs.items():
+            libfile = find_libfile(lib)
+            if not libfile:
+              missing_libs.append(lib)
+              for c in cells:
+                mos_per_cell[c] = 0
+              continue
+            cell_mos_map = parse_mos_per_cell(libfile)
+            for c in cells:
+              mos_per_cell[c] = cell_mos_map.get(c, 0)
+
+          # 3) Produce report
+          total = 0
+          lines = []
+          header = [
+            "MOSFET count from synthesis cell usage × PDK transistor-level netlists",
+            f"PDK: {pdk}",
+            f"Stats: {stats_path}",
+            "",
+            f"{'cell':40s} {'instances':>10s} {'mos/cell':>10s} {'mos total':>12s}",
+            f"{'-'*40} {'-'*10:>10s} {'-'*10:>10s} {'-'*12:>12s}",
+          ]
+          for cell in sorted(cell_counts.keys()):
+            n = cell_counts[cell]
+            m = mos_per_cell.get(cell, 0)
+            mt = n * m
+            total += mt
+            lines.append(f"{cell:40s} {n:10d} {m:10d} {mt:12d}")
+
+          footer = [
+            "",
+            f"TOTAL_MOSFETs={total}",
+          ]
+
+          with open("transistor_report.txt", "w", encoding="utf-8") as out:
+            out.write("\n".join(header + lines + footer) + "\n")
+
+          if missing_libs:
+            print("WARNING: Missing lib netlists for:", ", ".join(sorted(set(missing_libs))), file=sys.stderr)
+
+          print(f"Done. TOTAL_MOSFETs={total}")
+          PY
+
+          # Run inside the osic-tools container (has the PDK mounted)
           docker run --rm \
-            --user "$OWNER" \
-            -e GDS="$GDS" -e TOPCELL="$TOPCELL" \
-            -e PDK_ROOT="/foss/pdks" -e PDK="sky130A" \
+            --user "$(id -u):$(id -g)" \
+            -e PDK_ROOT="/foss/pdks" \
+            -e PDK="sky130A" \
+            -e STATS="$STATS" \
             -v "${PWD}:/work" -w /work \
             hpretl/iic-osic-tools:latest \
-            --shell bash -lc '
-              set -euo pipefail
-
-              echo "=== Container sees ==="
-              echo "GDS=$GDS"
-              echo "TOPCELL=$TOPCELL"
-              echo "PDK_ROOT=$PDK_ROOT"
-              id
-              ls -lah tt_submission | sed -n "1,200p"
-
-              # optional: ignore whatever default .magicrc the image has
-              magic -dnull -noconsole -rcfile /dev/null extract.tcl
-
-              # ---- Robust netlist detection (spice.out vs <top>.spice) ----
-              SPICE_FILE="${TOPCELL}.spice"
-
-              if [ ! -f "$SPICE_FILE" ] && [ -f "spice.out" ]; then
-                SPICE_FILE="spice.out"
-              fi
-
-              if [ ! -f "$SPICE_FILE" ]; then
-                SPICE_FILE="$(ls -1 *.spice *.spc *.cdl *.cir 2>/dev/null | head -n 1 || true)"
-              fi
-
-              if [ -z "${SPICE_FILE}" ] || [ ! -f "${SPICE_FILE}" ]; then
-                echo "ERROR: No SPICE-like netlist found after Magic."
-                echo "Files now:"
-                ls -lah
-                exit 1
-              fi
-
-              echo "Using netlist: ${SPICE_FILE}"
-
-              MOS=$(grep -c "^M" "$SPICE_FILE" || true)
-              echo "MOSFET count: $MOS"
-
-              printf "GDS=%s\nTOPCELL=%s\nNETLIST=%s\nMOSFETs=%s\n" "$GDS" "$TOPCELL" "$SPICE_FILE" "$MOS" > transistor_report.txt
-            '
-
+            --skip bash -lc 'python3 count_mos.py && sed -n "1,80p" transistor_report.txt'
 
       - name: Upload report
         uses: actions/upload-artifact@v4
